@@ -1,0 +1,20 @@
+{
+  "name": "pi-nvim-review-comments",
+  "version": "0.1.0",
+  "description": "Pi extension for reviewing full-context git diffs in nvim/vim and sending inline comments back to the agent.",
+  "license": "MIT",
+  "keywords": ["pi-package", "pi", "nvim", "review", "diff", "comments"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Fcallahan/pi_nvim_review_comments.git"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "pi": {
+    "extensions": ["index.ts"]
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.75.0"
+  }
+}
