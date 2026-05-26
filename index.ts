@@ -47,10 +47,9 @@ interface ReviewFile {
 }
 
 export default function (pi: ExtensionAPI) {
-  pi.registerCommand({
-    name: "nvim-review",
+  pi.registerCommand("nvim-review", {
     description: "Review full-context git diffs in nvim/vim and send inline comments back to the agent",
-    async execute(args: string, ctx: ReviewContext) {
+    async handler(args: string, ctx: ReviewContext) {
       await runNvimReview(pi, args, ctx);
     },
   });
