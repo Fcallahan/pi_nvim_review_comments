@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, join, relative } from "node:path";
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -41,6 +41,7 @@ interface ChangedFile {
 
 interface ReviewFile {
   reviewPath: string;
+  jsonPath: string;
   vimScriptPath: string;
   firstDiffLine: number;
   hasChanges: boolean;
@@ -48,9 +49,16 @@ interface ReviewFile {
 
 export default function (pi: ExtensionAPI) {
   pi.registerCommand("nvim-review", {
-    description: "Review full-context git diffs in nvim/vim and send inline comments back to the agent",
+    description: "Review full-context git diffs in nvim/vim and send inline REVIEW comments back to the agent",
     async handler(args: string, ctx: ReviewContext) {
       await runNvimReview(pi, args, ctx);
+    },
+  });
+
+  pi.registerCommand("review", {
+    description: "Review git diffs in nvim using Tulio's rich pi_review workflow",
+    async handler(args: string, ctx: ReviewContext) {
+      await runTulioReview(pi, args, ctx);
     },
   });
 }
@@ -67,6 +75,8 @@ export async function runNvimReview(pi: ExtensionAPI, args: string, ctx: ReviewC
     return;
   }
 
+  cleanupStaleReviewFiles(ctx.cwd);
+
   const editor = resolveEditor();
   if (!editor) {
     ctx.ui.notify("/nvim-review requires nvim or vim, or set PI_REVIEW_EDITOR/VISUAL/EDITOR", "error");
@@ -75,6 +85,7 @@ export async function runNvimReview(pi: ExtensionAPI, args: string, ctx: ReviewC
 
   const review = createReviewDiff(ctx.cwd, parsed);
   if (!review.hasChanges) {
+    deleteReviewFiles(review);
     ctx.ui.notify("No changes found to review", "info");
     return;
   }
@@ -86,43 +97,94 @@ export async function runNvimReview(pi: ExtensionAPI, args: string, ctx: ReviewC
 
   const originalReviewContent = readFileSync(review.reviewPath, "utf-8");
 
-  const exitCode = await ctx.ui.custom<number | null>((tui, _theme, _kb, done) => {
-    tui.stop();
-    process.stdout.write("\x1b[2J\x1b[H");
+  // Ensure review files are cleaned up no matter how the function exits.
+  try {
+    const exitCode = await launchEditor(ctx, buildInlineEditorCommand(editor, review));
 
-    const command = buildEditorCommand(editor, review.reviewPath, review.vimScriptPath, review.firstDiffLine);
-    const shell = process.env.SHELL || "/bin/sh";
-    const result = spawnSync(shell, ["-lc", command], {
-      cwd: ctx.cwd,
-      stdio: "inherit",
-      env: process.env,
+    if (exitCode !== 0) {
+      ctx.ui.notify(`/nvim-review editor exited with code ${exitCode}`, "warning");
+      return;
+    }
+
+    const comments = extractInlineReviewComments(readFileSync(review.reviewPath, "utf-8"), originalReviewContent);
+    if (!comments.trim()) {
+      ctx.ui.notify("No REVIEW: comments found", "info");
+      return;
+    }
+
+    const message = `Please address these inline review comments from my nvim diff review.\n\n${comments.trim()}\n\nReview diff: ${relative(ctx.cwd, review.reviewPath)}`;
+    sendReviewMessage(pi, ctx, message);
+  } finally {
+    deleteReviewFiles(review);
+    cleanupStaleReviewFiles(ctx.cwd);
+  }
+}
+
+export async function runTulioReview(pi: ExtensionAPI, args: string, ctx: ReviewContext): Promise<void> {
+  const parsed = parseArgs(args);
+  if (parsed.help) {
+    ctx.ui.notify("Usage: /review [--staged|--unstaged] [--context=N] [path ...]", "info");
+    return;
+  }
+
+  if (!isGitRepo(ctx.cwd)) {
+    ctx.ui.notify("/review requires a git repository", "error");
+    return;
+  }
+
+  cleanupStaleReviewFiles(ctx.cwd);
+
+  const editor = resolveEditor();
+  if (!editor) {
+    ctx.ui.notify("/review requires nvim or vim, or set PI_REVIEW_EDITOR/VISUAL/EDITOR", "error");
+    return;
+  }
+
+  const review = createReviewDiff(ctx.cwd, parsed);
+  if (!review.hasChanges) {
+    deleteReviewFiles(review);
+    ctx.ui.notify("No changes found to review", "info");
+    return;
+  }
+
+  if (!ctx.hasUI) {
+    ctx.ui.notify(`Review diff created: ${review.reviewPath}`, "info");
+    return;
+  }
+
+  try {
+    const exitCode = await launchEditor(ctx, buildTulioEditorCommand(editor, review), {
+      PI_REVIEW_ROOT: ctx.cwd,
+      PI_REVIEW_DIFF: review.reviewPath,
+      PI_REVIEW_JSON: review.jsonPath,
+      PI_REVIEW_SCOPE: parsed.scope,
+      PI_REVIEW_BACKEND: "diffview",
+      PI_REVIEW_DIFFVIEW_ARGS: JSON.stringify(buildDiffviewArgs(parsed)),
     });
 
-    tui.start();
-    tui.requestRender(true);
-    done(result.status ?? 1);
-    return { render: () => [], invalidate: () => {} };
-  });
+    if (exitCode !== 0) {
+      ctx.ui.notify(`/review editor exited with code ${exitCode}`, "warning");
+      return;
+    }
 
-  if (exitCode !== 0) {
-    ctx.ui.notify(`/nvim-review editor exited with code ${exitCode}`, "warning");
-    return;
-  }
+    const comments = extractReviewCommentsFromJson(review.jsonPath).trim();
+    if (!comments) {
+      ctx.ui.notify("No review comments found", "info");
+      return;
+    }
 
-  const comments = extractInlineReviewComments(readFileSync(review.reviewPath, "utf-8"), originalReviewContent);
-  if (!comments.trim()) {
-    ctx.ui.notify(`No REVIEW: comments found. Review saved at ${relative(ctx.cwd, review.reviewPath)}`, "info");
-    return;
+    const message = `Please address these inline review comments from my Tulio nvim review.\n\n${comments}`;
+    sendReviewMessage(pi, ctx, message);
+  } finally {
+    deleteReviewFiles(review);
+    cleanupStaleReviewFiles(ctx.cwd);
   }
+}
 
-  const message = `Please address these inline review comments from my nvim diff review.\n\n${comments.trim()}\n\nReview diff: ${relative(ctx.cwd, review.reviewPath)}`;
-  if (ctx.isIdle()) {
-    pi.sendUserMessage(message);
-    ctx.ui.notify("Review comments sent to agent", "success");
-  } else {
-    pi.sendUserMessage(message, { deliverAs: "followUp" });
-    ctx.ui.notify("Review comments queued for agent", "info");
-  }
+function buildDiffviewArgs(parsed: ParsedArgs): string[] {
+  const args = parsed.scope === "staged" ? ["--cached"] : [];
+  if (parsed.paths.length > 0) args.push("--", ...parsed.paths);
+  return args;
 }
 
 function parseArgs(args: string): ParsedArgs {
@@ -159,6 +221,7 @@ function createReviewDiff(cwd: string, parsed: ParsedArgs): ReviewFile {
 
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const reviewPath = join(reviewDir, `nvim-review-${stamp}.diff`);
+  const jsonPath = join(reviewDir, `nvim-review-${stamp}.json`);
   const vimScriptPath = join(reviewDir, `nvim-review-${stamp}.vim`);
   const status = safeGit(cwd, ["status", "--short", "-uall"]);
   const changedFiles = getChangedFiles(cwd, parsed.paths, parsed.scope);
@@ -171,7 +234,37 @@ function createReviewDiff(cwd: string, parsed: ParsedArgs): ReviewFile {
   writeFileSync(reviewPath, rendered.content, "utf-8");
   writeFileSync(vimScriptPath, renderReviewVimScript(), "utf-8");
 
-  return { reviewPath, vimScriptPath, firstDiffLine: rendered.firstDiffLine, hasChanges };
+  return { reviewPath, jsonPath, vimScriptPath, firstDiffLine: rendered.firstDiffLine, hasChanges };
+}
+
+/** Delete the .diff and .vim files for a single review. */
+function deleteReviewFiles(review: ReviewFile): void {
+  for (const f of [review.reviewPath, review.jsonPath, review.vimScriptPath]) {
+    try {
+      if (existsSync(f)) unlinkSync(f);
+    } catch {
+      // best effort
+    }
+  }
+}
+
+/** Remove stale .diff and .vim files left from interrupted sessions. */
+function cleanupStaleReviewFiles(cwd: string): void {
+  const reviewDir = join(cwd, ".pi", "reviews");
+  if (!existsSync(reviewDir)) return;
+  try {
+    for (const entry of readdirSync(reviewDir)) {
+      if (entry.endsWith(".diff") || entry.endsWith(".vim") || entry.endsWith(".json")) {
+        try {
+          unlinkSync(join(reviewDir, entry));
+        } catch {
+          // best effort per file
+        }
+      }
+    }
+  } catch {
+    // best effort for directory read
+  }
 }
 
 function collectFullContextDiff(cwd: string, parsed: ParsedArgs): string {
@@ -414,6 +507,35 @@ function extractInlineReviewComments(content: string, originalContent = ""): str
   return comments.join("\n").trim();
 }
 
+function extractReviewCommentsFromJson(jsonPath: string): string {
+  if (!existsSync(jsonPath)) return "";
+  try {
+    const raw = readFileSync(jsonPath, "utf-8");
+    const data = JSON.parse(raw);
+    if (!data.comments || !Array.isArray(data.comments)) return "";
+
+    // Only collect active comments
+    const active = data.comments.filter((c: any) => !c.resolved && c.body && c.body.trim());
+    if (active.length === 0) return "";
+
+    const lines: string[] = [];
+    for (const c of active) {
+      const location = c.file ? `${c.file}${c.line ? ":" + c.line : ""}` : "general";
+      lines.push(`- ${location}: ${c.body}`);
+      if (c.context && Array.isArray(c.context) && c.context.length > 0) {
+        for (const ctxLine of c.context) {
+          const prefix = ctxLine.side === "old" ? "-" : ctxLine.side === "new" ? "+" : " ";
+          lines.push(`  ${prefix} ${ctxLine.code}`);
+        }
+      }
+    }
+
+    return lines.join("\n");
+  } catch {
+    return "";
+  }
+}
+
 function resolveEditor(): string | undefined {
   const configured = process.env.PI_REVIEW_EDITOR || process.env.VISUAL || process.env.EDITOR;
   if (configured?.trim()) return configured.trim();
@@ -422,16 +544,57 @@ function resolveEditor(): string | undefined {
   return undefined;
 }
 
-function buildEditorCommand(editor: string, reviewPath: string, vimScriptPath: string, firstDiffLine: number): string {
+async function launchEditor(ctx: ReviewContext, command: string, env: Record<string, string> = {}): Promise<number | null> {
+  return ctx.ui.custom<number | null>((tui, _theme, _kb, done) => {
+    tui.stop();
+    process.stdout.write("\x1b[2J\x1b[H");
+
+    const shell = process.env.SHELL || "/bin/sh";
+    const result = spawnSync(shell, ["-lc", command], {
+      cwd: ctx.cwd,
+      stdio: "inherit",
+      env: { ...process.env, ...env },
+    });
+
+    tui.start();
+    tui.requestRender(true);
+    done(result.status ?? 1);
+    return { render: () => [], invalidate: () => {} };
+  });
+}
+
+function sendReviewMessage(pi: ExtensionAPI, ctx: ReviewContext, message: string): void {
+  if (ctx.isIdle()) {
+    pi.sendUserMessage(message);
+    ctx.ui.notify("Review comments sent to agent", "success");
+  } else {
+    pi.sendUserMessage(message, { deliverAs: "followUp" });
+    ctx.ui.notify("Review comments queued for agent", "info");
+  }
+}
+
+function buildInlineEditorCommand(editor: string, review: ReviewFile): string {
   const firstWord = editor.trim().split(/\s+/)[0] || editor;
   const base = basename(firstWord);
   const isVim = base === "nvim" || base === "vim" || base === "vi";
 
   if (isVim) {
-    return `${editor} -S ${shellQuote(vimScriptPath)} +${firstDiffLine} ${shellQuote(reviewPath)}`;
+    return `${editor} -S ${shellQuote(review.vimScriptPath)} +${review.firstDiffLine} ${shellQuote(review.reviewPath)}`;
   }
 
-  return `${editor} ${shellQuote(reviewPath)}`;
+  return `${editor} ${shellQuote(review.reviewPath)}`;
+}
+
+function buildTulioEditorCommand(editor: string, review: ReviewFile): string {
+  const firstWord = editor.trim().split(/\s+/)[0] || editor;
+  const base = basename(firstWord);
+  const isVim = base === "nvim" || base === "vim" || base === "vi";
+
+  if (isVim) {
+    return `${editor} -c "silent! lua require('tuliopaim.pi_review').start()" +${review.firstDiffLine} ${shellQuote(review.reviewPath)}`;
+  }
+
+  return `${editor} ${shellQuote(review.reviewPath)}`;
 }
 
 function shellQuote(value: string): string {

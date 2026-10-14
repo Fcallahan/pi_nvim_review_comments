@@ -8,9 +8,6 @@
     "type": "git",
     "url": "git+https://github.com/Fcallahan/pi_nvim_review_comments.git"
   },
-  "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*"
-  },
   "pi": {
     "extensions": ["index.ts"]
   },

@@ -4,18 +4,19 @@ A Pi extension for reviewing current git changes in `nvim`/`vim` as a full-conte
 
 ## What it does
 
-- Adds `/nvim-review` to Pi.
+- Adds `/nvim-review` to Pi for the original inline `REVIEW:` scratch-diff workflow.
+- Adds `/review` to Pi for Tulio's richer side-by-side Diffview + `tuliopaim.pi_review` JSON/virtual-comment workflow.
 - Generates one `.diff` review file under `.pi/reviews/`.
 - Includes all current changes with full-file context by default.
 - Includes untracked text files as new-file diffs.
 - Opens the review diff in `nvim` or `vim`.
-- Provides review mappings:
+- Provides review mappings for `/nvim-review`:
   - `]h` / `[h` next/previous hunk
   - `]f` / `[f` next/previous file
   - `<leader>c` or `gc` add a review comment
 - Supports visual selection before commenting.
-- Inserts a visible inline review box in the diff.
-- On `:wq`, extracts `REVIEW:` comments and sends them to the Pi agent.
+- Inserts a visible inline review box in the diff for `/nvim-review`.
+- On `:wq`, extracts review comments and sends them to the Pi agent.
 
 ## Dependencies
 
@@ -87,37 +88,49 @@ Then in Pi:
 
 ## Usage
 
-Open a review for all current changes:
+Open your original inline `REVIEW:` workflow:
 
 ```text
 /nvim-review
 ```
 
+Open Tulio's rich side-by-side Diffview JSON/virtual-comment workflow:
+
+```text
+/review
+```
+
+Both commands support the same arguments.
+
 Review only staged changes:
 
 ```text
 /nvim-review --staged
+/review --staged
 ```
 
 Review only unstaged/worktree changes:
 
 ```text
 /nvim-review --unstaged
+/review --unstaged
 ```
 
 Limit context if the full-context diff is too large:
 
 ```text
 /nvim-review --context=80
+/review --context=80
 ```
 
 Review specific paths:
 
 ```text
 /nvim-review src/foo.ts README.md
+/review src/foo.ts README.md
 ```
 
-## Inside nvim/vim
+## Inside nvim/vim for `/nvim-review`
 
 Navigation:
 
@@ -169,6 +182,32 @@ Save and quit:
 ```
 
 Pi extracts the `REVIEW:` comments, attaches nearby file/line context, and sends them to the agent.
+
+## Inside nvim for `/review`
+
+Tulio's workflow uses `~/.config/nvim/lua/tuliopaim/pi_review.lua` and reads these environment variables from Pi:
+
+- `PI_REVIEW_ROOT`
+- `PI_REVIEW_DIFF`
+- `PI_REVIEW_JSON`
+- `PI_REVIEW_SCOPE`
+- `PI_REVIEW_BACKEND=diffview`
+- `PI_REVIEW_DIFFVIEW_ARGS`
+
+This opens `diffview.nvim` inside Neovim rather than the inline unified diff buffer.
+
+Primary mappings:
+
+```text
+<leader>rc  add/edit review comment
+<leader>rd  delete review comment
+<leader>rx  resolve/unresolve comment
+<leader>rs  save review JSON
+<leader>rq  save and quit
+<leader>rn  next review comment
+<leader>rp  previous review comment
+<leader>rR  restart review / clear comments
+```
 
 ## Editor selection
 
